@@ -21,7 +21,7 @@ use {
         TransactionRecorder,
     },
     solana_runtime::{
-        bank::{Bank, LoadAndExecuteTransactionsOutput},
+        bank::{Bank, LoadAndExecuteTransactionsOutput, LoadExecute},
         transaction_batch::TransactionBatch,
         verify_precompiles::verify_precompiles,
     },
@@ -637,7 +637,8 @@ impl Consumer {
                         transaction_status_sender_enabled
                     ),
                     transaction_account_lock_limit: Some(bank.get_transaction_account_lock_limit()),
-                }
+                },
+                LoadExecute::Commit
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
 

@@ -109,48 +109,16 @@ use {
         account::{
             create_account_shared_data_with_fields as create_account, from_account, Account,
             AccountSharedData, InheritableAccountFields, ReadableAccount, WritableAccount,
-        },
-        bpf_loader_upgradeable,
-        clock::{
+        }, bpf_loader_upgradeable, clock::{
             BankId, Epoch, Slot, SlotCount, SlotIndex, UnixTimestamp, DEFAULT_HASHES_PER_TICK,
             DEFAULT_TICKS_PER_SECOND, INITIAL_RENT_EPOCH, MAX_PROCESSING_AGE,
             MAX_TRANSACTION_FORWARDING_DELAY, SECONDS_PER_DAY, UPDATED_HASHES_PER_TICK2,
             UPDATED_HASHES_PER_TICK3, UPDATED_HASHES_PER_TICK4, UPDATED_HASHES_PER_TICK5,
             UPDATED_HASHES_PER_TICK6,
-        },
-        epoch_info::EpochInfo,
-        epoch_schedule::EpochSchedule,
-        feature,
-        fee::{FeeBudgetLimits, FeeDetails, FeeStructure},
-        fee_calculator::FeeRateGovernor,
-        genesis_config::{ClusterType, GenesisConfig},
-        hard_forks::HardForks,
-        hash::{extend_and_hash, hashv, Hash},
-        incinerator,
-        inflation::Inflation,
-        inner_instruction::InnerInstructions,
-        message::{AccountKeys, SanitizedMessage},
-        native_loader,
-        native_token::LAMPORTS_PER_SOL,
-        packet::PACKET_DATA_SIZE,
-        precompiles::get_precompiles,
-        pubkey::Pubkey,
-        rent_collector::{CollectedInfo, RentCollector},
-        rent_debits::RentDebits,
-        reserved_account_keys::ReservedAccountKeys,
-        reward_info::RewardInfo,
-        signature::{Keypair, Signature},
-        slot_hashes::SlotHashes,
-        slot_history::{Check, SlotHistory},
-        stake::state::Delegation,
-        system_transaction,
-        sysvar::{self, last_restart_slot::LastRestartSlot, Sysvar, SysvarId},
-        timing::years_as_slots,
-        transaction::{
+        }, epoch_info::EpochInfo, epoch_schedule::EpochSchedule, feature, fee::{FeeBudgetLimits, FeeDetails, FeeStructure}, fee_calculator::FeeRateGovernor, genesis_config::{ClusterType, GenesisConfig}, hard_forks::HardForks, hash::{extend_and_hash, hashv, Hash}, incinerator, inflation::Inflation, inner_instruction::InnerInstructions, message::{AccountKeys, SanitizedMessage}, native_loader, native_token::LAMPORTS_PER_SOL, packet::PACKET_DATA_SIZE, precompiles::get_precompiles, pubkey::Pubkey, rent_collector::{CollectedInfo, RentCollector}, rent_debits::RentDebits, reserved_account_keys::ReservedAccountKeys, reward_info::RewardInfo, signature::{Keypair, Signature}, slot_hashes::SlotHashes, slot_history::{Check, SlotHistory}, stake::state::Delegation, system_instruction::SystemInstruction, system_transaction, sysvar::{self, last_restart_slot::LastRestartSlot, Sysvar, SysvarId}, timing::years_as_slots, transaction::{
             MessageHash, Result, SanitizedTransaction, Transaction, TransactionError,
             TransactionVerificationMode, VersionedTransaction, MAX_TX_ACCOUNT_LOCKS,
-        },
-        transaction_context::{TransactionAccount, TransactionReturnData},
+        }, transaction_context::{TransactionAccount, TransactionReturnData}
     },
     solana_svm::{
         account_loader::{collect_rent_from_account, LoadedTransaction},
@@ -174,21 +142,13 @@ use {
     solana_timings::{ExecuteTimingType, ExecuteTimings},
     solana_vote::vote_account::{VoteAccount, VoteAccountsHashMap},
     std::{
-        collections::{HashMap, HashSet},
-        convert::TryFrom,
-        fmt,
-        ops::{AddAssign, RangeFull, RangeInclusive},
-        path::PathBuf,
-        slice,
-        sync::{
+        collections::{HashMap, HashSet}, convert::TryFrom, fmt, fs::OpenOptions, io::Write, ops::{AddAssign, RangeFull, RangeInclusive}, path::PathBuf, slice, sync::{
             atomic::{
                 AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
                 Ordering::{AcqRel, Acquire, Relaxed},
             },
             Arc, LockResult, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
-        },
-        thread::Builder,
-        time::{Duration, Instant},
+        }, thread::Builder, time::{Duration, Instant}
     },
 };
 pub use {
@@ -204,6 +164,48 @@ use {
     solana_sdk::nonce,
     solana_svm::program_loader::load_program_with_pubkey,
 };
+
+#[derive(Debug)]
+pub struct TenSolLogger {
+    pub file: std::fs::File
+}
+
+impl TenSolLogger {
+    pub fn new() -> Self {
+        let file = match OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open("ten-sol-tracer.log") {
+                Ok(v) => v,
+                Err(e) => {
+                    panic!("FEX: Failed to open ten sol log: {:#?}", e)
+                }
+            };
+
+        info!("FEX TenSolLogger initialized");
+
+        Self { file }
+    }
+
+    pub fn commit(&mut self, messages: &Vec<String>) {
+        for msg in messages.iter() {
+            match self.file.write(msg.as_bytes()) {
+                Err(e) => warn!("FEX: TenSol Logger failed write op. Diag: {}", e.to_string()),
+                _ => {
+                }
+            }
+        }
+        let _ = self.file.flush().unwrap();
+    }
+}
+
+const TEN_SOL: u64 = 10 * LAMPORTS_PER_SOL;
+
+/// differentiate between simulations and actual processing
+pub enum LoadExecute {
+    Commit,
+    Simulate
+}
 
 /// params to `verify_accounts_hash`
 struct VerifyAccountsHashConfig {
@@ -309,6 +311,8 @@ pub struct BankRc {
     pub(crate) parent: RwLock<Option<Arc<Bank>>>,
 
     pub(crate) bank_id_generator: Arc<AtomicU64>,
+
+    pub ten_sol_logger: Arc<Mutex<TenSolLogger>>
 }
 
 impl BankRc {
@@ -317,6 +321,7 @@ impl BankRc {
             accounts: Arc::new(accounts),
             parent: RwLock::new(None),
             bank_id_generator: Arc::new(AtomicU64::new(0)),
+            ten_sol_logger: Arc::new(std::sync::Mutex::new(TenSolLogger::new()))
         }
     }
 }
@@ -1074,6 +1079,47 @@ impl AtomicBankHashStats {
 }
 
 impl Bank {
+    fn transactions_of_note(&self, batch: &[impl TransactionWithMeta]) -> Vec<String> {
+        let mut messages: Vec<_> = vec![];
+    
+        for transaction in batch.iter() {
+            let status = match self.get_signature_status(transaction.signature()) {
+                Some(v) => match v {
+                    Ok(_) => "OK".to_owned(),
+                    Err(e) => e.to_string(),
+                },
+                None => "None".to_owned(),
+            };
+    
+            for instruction in transaction.instructions_iter() {
+                if let Ok(si) = bincode::deserialize::<SystemInstruction>(&instruction.data) {
+                    match si {
+                        SystemInstruction::Transfer { lamports } => {
+                            // only log transfers above 10 SOL, eventually replace the expr with a const
+                            if lamports > TEN_SOL {
+                                let timestamp = self.unix_timestamp_from_genesis();
+                              
+                                let signature = transaction.signature();
+                                let sender_account_index = *instruction.accounts.get(0).unwrap() as usize;
+                                let sender = transaction.account_keys().get(sender_account_index).unwrap().to_string();
+                                let receiver_account_index = *instruction.accounts.get(1).unwrap() as usize;
+                                let receiver = transaction.account_keys().get(receiver_account_index).unwrap().to_string();
+    
+                                let message = format!("FEX: {:#?} - {} - {} lamports - {} - {} - {}\n", timestamp, signature, lamports, sender, receiver, status);
+                                messages.push(message);
+                            } 
+                        },
+                        _ => {
+                            // ignore all other instructions
+                        }
+                    }
+                }
+            }
+        }
+    
+        messages
+    }
+
     fn default_with_accounts(accounts: Accounts) -> Self {
         let mut bank = Self {
             skipped_rewrites: Mutex::default(),
@@ -1278,6 +1324,7 @@ impl Bank {
                 accounts: Arc::new(Accounts::new(accounts_db)),
                 parent: RwLock::new(Some(Arc::clone(&parent))),
                 bank_id_generator: Arc::clone(&parent.rc.bank_id_generator),
+                ten_sol_logger: Arc::clone(&parent.rc.ten_sol_logger),
             }
         });
 
@@ -3238,6 +3285,7 @@ impl Bank {
                 },
                 transaction_account_lock_limit: Some(self.get_transaction_account_lock_limit()),
             },
+            LoadExecute::Simulate
         );
 
         let units_consumed =
@@ -3359,8 +3407,19 @@ impl Bank {
         timings: &mut ExecuteTimings,
         error_counters: &mut TransactionErrorMetrics,
         processing_config: TransactionProcessingConfig,
+        mode: LoadExecute,
     ) -> LoadAndExecuteTransactionsOutput {
         let sanitized_txs = batch.sanitized_transactions();
+
+        match mode {
+            LoadExecute::Commit => {
+                let messages = self.transactions_of_note(sanitized_txs);
+                let mut guard = self.rc.ten_sol_logger.lock().unwrap();
+                guard.commit(&messages);
+                drop(guard);
+            }
+            _ => (),
+        }
 
         let (check_results, check_us) = measure_us!(self.check_transactions(
             sanitized_txs,
@@ -4574,6 +4633,7 @@ impl Bank {
                 recording_config,
                 transaction_account_lock_limit: Some(self.get_transaction_account_lock_limit()),
             },
+        LoadExecute::Commit
         );
 
         // pre_commit_callback could initiate an atomic operation (i.e. poh recording with block
